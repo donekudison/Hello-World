@@ -5,7 +5,7 @@
 # Subversion information:
 # $HeadURL: http://prdsvnrepo:8080/svn/projects/src/main/resources/scripts/makeDirs.pl $
 # $LastChangedDate: 2016-05-09 09:01:05 -0400 (Mon, 09 May 2016) $
-# $LastChangedBy: udaj $
+# $LastChangedBy: user $
 # $LastChangedRevision: 1389762 $
 #----------------------------------------------------------------------------
 use strict;
