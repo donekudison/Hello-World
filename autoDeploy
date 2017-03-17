@@ -1,0 +1,209 @@
+
+
+#!/bin/ksh
+
+DefaultUsage()
+{
+        echo "$0 -a app -v release -r rte -j {JIRA Ticket} -s"
+        echo " -j is optional for Jira ticket"
+        echo " -s is optional for email summary"
+        echo
+        exit 1
+}
+
+
+setupMessage()
+{
+        typeset action=""
+        typeset message=""
+        action=$1
+        message=$2
+
+        if [ ! -z "${JIRAID}" ]
+        then
+                mNotify="http://satews.vanguard.com:1080/notify/postMessage?app=provisionRte&type=autoProvisionOrchestration&rte=${RUNLEVEL}&id=${JIRAID}&actionType=${action}&message=${message}"
+
+                wget -qO- "${mNotify}"
+                echo ${mNotify} | tee -a ${LOGFILE}
+        else
+                echo ${message} | tee -a ${LOGFILE}
+        fi
+        
+}
+
+
+checkBLFLE()
+{
+        typeset mVar=""
+        mVar=$1
+        ATTEMPT_COUNT=0
+        MAX_CHECK_ATTEMPTS=3   # max retry
+        CHK_FILE=""
+        THROWN_EXCEPTION=0
+
+        if [[ "${mVar}" = "rte" ]]; then
+                CHK_FILE=${CMDATA_DIR}/adx/${APP_UPPER}\_${RELEASE}.adx.xml
+        else
+                CHK_FILE=${CMDATA_DIR}/${mVar}/${APP_UPPER}\_${RELEASE}.${mVar}.xml
+        fi
+
+        while [[ ${ATTEMPT_COUNT} -le ${MAX_CHECK_ATTEMPTS} ]]
+        do
+
+                if [[ "${mVar}" = "rte" ]]; then
+                        RTE_EXIST=$( egrep "AppEnv.* name=\"${RTE}\"" ${CHK_FILE})
+                        if [ ! -z "$RTE_EXIST" ]; then
+                                THROWN_EXCEPTION=0
+                                break
+                        else
+                                THROWN_EXCEPTION=1
+                        fi
+                else
+                        if [[ -f "${CHK_FILE}" ]]; then
+                                THROWN_EXCEPTION=0
+                                break
+                        else
+                                THROWN_EXCEPTION=1
+                        fi
+                fi
+
+                if [[ "${THROWN_EXCEPTION}" -eq 1 ]]; then
+                        if [[ ${MAX_CHECK_ATTEMPTS} -gt 1 ]]; then
+                                echo "..... Sleeping 30 seconds before attempting to check ${mVar} again." | tee -a ${LOGFILE}
+                                sleep 30
+                        fi
+                fi
+                
+                (( ATTEMPT_COUNT = ${ATTEMPT_COUNT} + 1 ))
+
+        done
+
+        if [[ "${THROWN_EXCEPTION}" -eq 1 ]]; then
+                if [ ${mVar} = "rte" ]; then
+                        setupMessage "FAILED" "Could not find ${RTE} in ${CHK_FILE} file"
+                else
+                        setupMessage "FAILED" "Could not find ${CHK_FILE} file"
+                fi
+                exit 3
+        fi
+
+
+        if [ "${mVar}" = "rte" ]; then
+                echo "... Found ${RTE} in ${CHK_FILE} file" | tee -a ${LOGFILE}
+        else
+                echo "... Found ${CHK_FILE} file" | tee -a ${LOGFILE}
+        fi
+
+SUMMARY=0
+
+BASE=$( dirname $0 )
+runlevel=$(whence $0 | cut -d'/' -f4)
+[ ! -d /cm/ret/${runlevel} ] && runlevel=prd
+export RUNLEVEL=${runlevel}
+echo "Script runlevel = $RUNLEVEL"
+
+
+while getopts a:v:r:j:s option
+do
+        case $option
+        in
+                                a) APP=$OPTARG;;
+                                v) RELEASE=$OPTARG;;
+                                r) RTE=$OPTARG;;
+                                j) JIRAID=$OPTARG;;
+                                s) SUMMARY=1;;
+                                *) DefaultUsage;;
+        esac
+done
+
+
+if [ -z "${APP}" -o -z "${RELEASE}" -o -z "${RTE}" ]
+then
+        echo "Missing arguments!"
+        DefaultUsage
+fi
+
+APP_UPPER=$(echo ${APP} | tr "[:lower:]" "[:upper:]")
+
+#Verify required Bladelogic files check.
+export CMDATA_DIR="/data/ret/prd/cmdata/output"
+checkBLFLE "epx"
+
+checkBLFLE "apx"
+
+checkBLFLE "adx"
+
+checkBLFLE "rte"
+
+APP_EXIST=$(egrep "AvtAppName.* name=\"${APP_UPPER}\"" /cm/ret/prd/eet/RulesEngine/cf_xml/avt/ArmAvt.xml)
+if [ -z "$APP_EXIST" ]
+then
+        setupMessage "FAILED" "Could not find $APP in ArmAvt.xml file"
+        exit 3
+fi
+
+#Check build region exist.
+BUILD_SSI=$( egrep "IS_BUILD_REGION=.?Y" ${CMDATA_DIR}/ssi/${APP}/${RELEASE}/ssi/*prov*.ssi /dev/null | head -n 1 | cut -d: -f1 )
+if [ ! -s "${BUILD_SSI}" ]
+then
+        setupMessage "FAILED" "Could not find the build region"
+        exit 3
+fi
+
+export BUILD_RTE=$(grep RTE "${BUILD_SSI}" | cut -d= -f2)
+export BUILD_CF_FILE_DIR=$(grep CF_FILE_DIR "${BUILD_SSI}" | cut -d= -f2)
+export G_LOGDIR=/var/Logs/ret/prd/provision
+export PROV_LOG_DIR=/var/Logs/ret/prd/provision
+export LOGFILE=${G_LOGDIR}/autoprovision_${RELEASE}_${APP}${RTE}_$(date '+%Y%m%d-%H%M%S').log
+
+#Check RTE SSI file exist.
+PROV_SSI_FILE=$( /bin/ls ${CMDATA_DIR}/ssi/${APP}/${RELEASE}/ssi/*prov*.ssi | grep "$RTE" | tail -1f)
+export APP_SSI_FILE=$( /bin/ls ${CMDATA_DIR}/ssi/${APP}/${RELEASE}/ssi/*application*.ssi | grep "$RTE" | tail -1f)
+if [ ! -s "${PROV_SSI_FILE}" ]
+then
+        setupMessage "FAILED" "Could not find the SSI for $RTE"
+        exit 3
+fi
+. $PROV_SSI_FILE
+
+if [ ! -s "${APP_SSI_FILE}" ]
+then
+        setupMessage "FAILED" "Could not find the SSI for $RTE"
+        exit 3
+fi
+. $APP_SSI_FILE
+
+export APP_RTE_NUM=$(grep ENV_APPS_RTE_NO "${APP_SSI_FILE}" | cut -d= -f2)
+
+
+echo "Provisioning ${RELEASE} ${APP} ${RTE}" | tee -a ${LOGFILE}
+if [ -z "$JIRAID" ]
+then
+        ${BASE}/provisionRte.ksh -f ${PROV_SSI_FILE}
+        RC=$?
+        echo "${BASE}/provisionRte.ksh -f ${PROV_SSI_FILE}, RC=${RC}" | tee -a ${LOGFILE}
+else
+        ${BASE}/provisionRte.ksh -f ${PROV_SSI_FILE} -j ${JIRAID}
+        RC=$?
+        if [ "${RC}" -eq 0 ]
+        then
+                mActType="SUCCEEDED"  
+        else
+                mActType="FAILED"
+        fi
+
+        echo "${BASE}/provisionRte.ksh -f ${PROV_SSI_FILE} -j ${JIRAID}, RC=${RC}" | tee -a ${LOGFILE}
+        message="Completed autoProvision.ksh for ${RELEASE}_${APP}${RTE} - ${mActType}, RC=${RC}"       
+        setupMessage ${mActType} "${message}"
+
+fi
+echo | tee -a ${LOGFILE}
+
+
+
+if [ "${SUMMARY}" -eq 1 ]
+then
+        DEPLSTATUS=$( grep "Deployment Status:" "${LOGFILE}" | sed -e 's#.*Deployment Status:##' | head -n 1 )
+        cat ${LOGFILE} | mailx -s "Auto Provision Report for ${RELEASE} ${APP} ${RTE}: ${DEPLSTATUS}" retail_si_env_unix@vanguard.com
+        #cat ${LOGFILE} | mailx -s "Auto Provision Report for ${RELEASE} ${APP} ${RTE}: ${DEPLSTATUS}" ur7c@vanguard.com
+fi
